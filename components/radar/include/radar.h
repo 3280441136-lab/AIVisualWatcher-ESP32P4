@@ -1,21 +1,13 @@
-#pragma once
+#ifndef _RADAR_H_
+#define _RADAR_H_
 
-#include "driver/gpio.h"
-#include "esp_err.h"
+#include <stdbool.h>       //bool类型
 
-#define RADAR_OUT_GPIO GPIO_NUM_21
+#include "esp_err.h"       //esp_err_t返回值类型
+#include "freertos/FreeRTOS.h" //FreeRTOS基础类型和宏
+#include "freertos/task.h"     //TaskHandle_t任务句柄类型
 
-typedef enum
-{
-    RADAR_DIRECTION_NORTH = 0,
-    RADAR_DIRECTION_EAST,
-    RADAR_DIRECTION_SOUTH,
-    RADAR_DIRECTION_WEST,
-    RADAR_DIRECTION_COUNT,
-} radar_direction_t;
+esp_err_t radar_init(TaskHandle_t taskhandle);
+bool radar_is_active(void);
 
-typedef void (*radar_event_cb_t)(radar_direction_t direction, void *user_ctx);
-
-esp_err_t radar_init(radar_event_cb_t event_cb, void *user_ctx);
-esp_err_t radar_simulate_trigger(radar_direction_t direction);
-const char *radar_direction_to_name(radar_direction_t direction);
+#endif

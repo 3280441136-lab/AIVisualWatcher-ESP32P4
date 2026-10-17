@@ -1,59 +1,21 @@
-#include "esp_err.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "app_fsm.h"       //应用状态机组件：启动状态机任务
+#include "pir.h"           //PIR组件：初始化PIR GPIO并读取PIR状态
+#include "radar.h"         //雷达组件：初始化雷达GPIO中断并通知状态机任务
+#include "vision.h"        //视觉组件：初始化屏幕、摄像头和后续视觉检测入口
 
-#include "intrusion.h"
-#include "pir.h"
-#include "radar.h"
+//ESP-IDF错误检查
+#include "esp_err.h"       //ESP_ERROR_CHECK和esp_err_t错误码
 
-static const char *TAG = "main";
+//RTOS任务句柄
+#include "freertos/task.h" //TaskHandle_t任务句柄类型
 
-static void radar_event_handler(radar_direction_t direction, void *user_ctx)
-{
-    (void)user_ctx;
-    intrusion_on_radar_event(direction);
-}
-
-static void pir_event_handler(pir_direction_t direction, void *user_ctx)
-{
-    (void)user_ctx;
-    intrusion_on_pir_event(direction);
-}
-
-static void demo_task(void *arg)
-{
-    (void)arg;
-
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    ESP_LOGI(TAG, "demo: simulate radar north trigger");
-    ESP_ERROR_CHECK(radar_simulate_trigger(RADAR_DIRECTION_NORTH));
-
-    vTaskDelay(pdMS_TO_TICKS(800));
-    ESP_LOGI(TAG, "demo: simulate PIR north confirm");
-    ESP_ERROR_CHECK(pir_simulate_trigger(PIR_DIRECTION_NORTH));
-
-    vTaskDelete(NULL);
-}
-
+//main入口
 void app_main(void)
 {
-    ESP_ERROR_CHECK(intrusion_init());
-    ESP_ERROR_CHECK(radar_init(radar_event_handler, NULL));
-    ESP_ERROR_CHECK(pir_init(pir_event_handler, NULL));
+    TaskHandle_t app_fsm_task_handle = NULL;
 
-    ESP_LOGI(TAG, "Radar GPIO is GPIO:%d", RADAR_OUT_GPIO);
-    ESP_LOGI(TAG, "PIR GPIO is GPIO:%d", PIR_OUT_GPIO);
-    ESP_LOGI(TAG, "hardware is not required now, demo task will simulate one double-trigger flow");
-
-    const BaseType_t task_ret = xTaskCreate(demo_task,
-                                            "demo_task",
-                                            2048,
-                                            NULL,
-                                            5,
-                                            NULL);
-    if (task_ret != pdPASS)
-    {
-        ESP_LOGE(TAG, "failed to create demo task");
-    }
+    ESP_ERROR_CHECK(pir_init());
+    ESP_ERROR_CHECK(vision_init());
+    ESP_ERROR_CHECK(app_fsm_start(&app_fsm_task_handle));
+    ESP_ERROR_CHECK(radar_init(app_fsm_task_handle));
 }

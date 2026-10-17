@@ -77,6 +77,4 @@ Desktop.ini
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
 
-# VS Code ESP-IDF settings often contain absolute paths to one developer's PC.
-# Keep them local unless the team later adds a sanitized shared template.
 .vscode/

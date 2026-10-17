@@ -1,159 +1,67 @@
-#include "radar.h"
+#include "radar.h"         //radar组件对外接口：radar_init()和radar_is_active()
 
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/task.h"
-#include <stdint.h>
+//ESP-IDF错误检查
+#include "esp_check.h"     //ESP_RETURN_ON_ERROR错误检查宏
+#include "esp_err.h"       //esp_err_t和ESP_OK错误码
 
-#define RADAR_QUEUE_LENGTH 8    //雷达GPIO信号队列长度
-#define RADAR_TASK_STACK_SIZE 2048  //雷达任务栈
-#define RADAR_TASK_PRIORITY 10  //雷达任务优先级
+//GPIO输入和中断
+#include "driver/gpio.h"   //GPIO配置、读电平、安装中断服务
 
-typedef struct
+//RTOS任务通知和ISR切换
+#include "freertos/FreeRTOS.h" //pdTRUE、pdFALSE、BaseType_t等FreeRTOS基础类型和宏
+#include "freertos/task.h"     //TaskHandle_t、vTaskNotifyGiveFromISR()、portYIELD_FROM_ISR()
+
+#define RADAR_GPIO GPIO_NUM_15
+
+#define TAG "radar"
+
+static TaskHandle_t main_taskhandle;
+
+bool radar_is_active(void)
 {
-    radar_direction_t direction;
-    gpio_num_t gpio_num;
-} radar_evt_t;
-
-static const char *TAG = "radar";   //雷达打印前缀名
-
-static QueueHandle_t s_radar_evt_queue; //雷达GPIO信号队列
-static radar_event_cb_t s_event_cb;
-static void *s_event_user_ctx;
-
-//雷达中断服务函数
-static void radar_isr_handler(void *arg)
-{
-    const radar_evt_t evt = {
-        .direction = RADAR_DIRECTION_NORTH,
-        .gpio_num = (gpio_num_t)(intptr_t)arg,
-    };
-
-    xQueueSendFromISR(s_radar_evt_queue, &evt, NULL);
+    return gpio_get_level(RADAR_GPIO);
 }
 
-//雷达任务
-static void radar_task(void *arg)   
+//雷达GPIO中断服务函数
+static void IRAM_ATTR radar_gpio_isr_handler(void* arg)
 {
     (void)arg;
-
-    radar_evt_t evt;
-
-    while (1)
+    BaseType_t high_task_wakeup = pdFALSE;
+    vTaskNotifyGiveFromISR(main_taskhandle, &high_task_wakeup);
+    if(high_task_wakeup == pdTRUE)
     {
-        if (xQueueReceive(s_radar_evt_queue, &evt, portMAX_DELAY) == pdTRUE)
-        {
-            ESP_LOGI(TAG, "Radar target detected direction:%s GPIO:%d",
-                     radar_direction_to_name(evt.direction),
-                     evt.gpio_num);
-
-            if (s_event_cb != NULL)
-            {
-                s_event_cb(evt.direction, s_event_user_ctx);
-            }
-        }
+        portYIELD_FROM_ISR();
     }
 }
 
 //雷达初始化
-esp_err_t radar_init(radar_event_cb_t event_cb, void *user_ctx)
+esp_err_t radar_init(TaskHandle_t taskhandle)
 {
-    s_event_cb = event_cb;
-    s_event_user_ctx = user_ctx;
+    main_taskhandle = taskhandle;
 
-    //创建雷达GPIO信号队列
-    s_radar_evt_queue = xQueueCreate(RADAR_QUEUE_LENGTH, sizeof(radar_evt_t));
-
-    if (s_radar_evt_queue == NULL)
+    gpio_config_t radar_gpio_conf = 
     {
-        return ESP_ERR_NO_MEM;
-    }
-
-    //配置雷达GPIO口
-    const gpio_config_t io_conf = {
-        .pin_bit_mask = 1ULL << RADAR_OUT_GPIO,
+        .pin_bit_mask = (1ULL << RADAR_GPIO),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
         .intr_type = GPIO_INTR_POSEDGE,
     };
 
-    esp_err_t ret = gpio_config(&io_conf);
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
+    //配置雷达GPIO
+    ESP_RETURN_ON_ERROR(gpio_config(&radar_gpio_conf),
+                        TAG,
+                        "radar gpio config failed");
 
-    //安装雷达GPIO口中断
-    ret = gpio_install_isr_service(0);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
-    {
-        return ret;
-    }
+    //安装GPIO中断
+    ESP_RETURN_ON_ERROR(gpio_install_isr_service(0),
+                        TAG,
+                        "radar gpio install isr service failed");
 
-    //添加雷达GPIO口中断服务函数,并给中断服务函数传参
-    ret = gpio_isr_handler_add(RADAR_OUT_GPIO, 
-                             radar_isr_handler, 
-                             (void *)(intptr_t)RADAR_OUT_GPIO);
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
-
-    //创建雷达任务
-    BaseType_t task_ret = xTaskCreate(radar_task,
-                                     "radar_task", 
-                                     RADAR_TASK_STACK_SIZE,
-                                     NULL, 
-                                     RADAR_TASK_PRIORITY,
-                                     NULL);
-    if (task_ret != pdPASS)
-    {
-        return ESP_ERR_NO_MEM;
-    }
+    //添加雷达GPIO中断服务函数
+    ESP_RETURN_ON_ERROR(gpio_isr_handler_add(RADAR_GPIO, radar_gpio_isr_handler, NULL),
+                        TAG,
+                        "radar gpio add isr handler failed");
 
     return ESP_OK;
-}
-
-esp_err_t radar_simulate_trigger(radar_direction_t direction)
-{
-    if (direction >= RADAR_DIRECTION_COUNT)
-    {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (s_radar_evt_queue == NULL)
-    {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    const radar_evt_t evt = {
-        .direction = direction,
-        .gpio_num = RADAR_OUT_GPIO,
-    };
-
-    if (xQueueSend(s_radar_evt_queue, &evt, 0) != pdTRUE)
-    {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    return ESP_OK;
-}
-
-const char *radar_direction_to_name(radar_direction_t direction)
-{
-    switch (direction)
-    {
-    case RADAR_DIRECTION_NORTH:
-        return "north";
-    case RADAR_DIRECTION_EAST:
-        return "east";
-    case RADAR_DIRECTION_SOUTH:
-        return "south";
-    case RADAR_DIRECTION_WEST:
-        return "west";
-    default:
-        return "unknown";
-    }
 }
